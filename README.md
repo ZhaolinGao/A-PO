@@ -54,11 +54,24 @@ python ./preprocess/data_preprocess/math.py
 ### Offline Generation
 
 To estimate the optimal value function, we generate 8 responses per prompt with the reference model and gather the reward. Our generated data can be found on huggingface:
-|     |     |     |
-|-----|-----|-----|
-| Qwen2.5-1.5B | [GSM8K](https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_1.5b_eval)  | [MATH](https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_1.5b_eval) |
-| Qwen2.5-3B | [GSM8K](https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_3b_eval)  | [MATH](https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_3b_eval) |
-| Qwen2.5-7B | [GSM8K](https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_7b_eval)  | [MATH](https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_7b_eval) |
+
+<table>
+  <tr>
+    <td>Qwen2.5-1.5B</td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_1.5b_eval">GSM8K</a></td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_1.5b_eval">MATH</a></td>
+  </tr>
+  <tr>
+    <td>Qwen2.5-3B</td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_3b_eval">GSM8K</a></td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_3b_eval">MATH</a></td>
+  </tr>
+  <tr>
+    <td>Qwen2.5-7B</td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/gsm8k_size_qwen2.5_7b_eval">GSM8K</a></td>
+    <td><a href="https://huggingface.co/datasets/Cornell-AGI/math_size_qwen2.5_7b_eval">MATH</a></td>
+  </tr>
+</table>
 
 If you want to process and generate your own data, you can try the following scripts:
 ```bash
