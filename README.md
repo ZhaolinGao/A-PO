@@ -13,7 +13,7 @@
 
 </div>
 
-Recent advances in LLMs, including **OpenAI-o1 and DeepSeekR1**, have demonstrated remarkable effectiveness of reinforcement learning (RL) with rule-based rewards. However, methods like **GRPO and PPO** require explicit critics or multiple generations per prompt, resulting in high computational and memory costs.
+Recent advances in LLMs, including **OpenAI-o1 and DeepSeekR1**, have demonstrated the remarkable effectiveness of reinforcement learning (RL) with rule-based rewards. However, methods like **GRPO and PPO** require explicit critics or multiple generations per prompt, resulting in high computational and memory costs.
 
 ***Can we develop simpler and more efficient RL
 algorithms for long context reasoning?***
@@ -22,7 +22,7 @@ algorithms for long context reasoning?***
 
 ### 🔥 **$A^\star$-PO** — **Policy Optimization via Optimal Advantage Regression**
 
-A new RL algorithm for LLMs that first estimates the optimal value function **offline** via sampling from reference policy, then perform **on-policy** updates with just **1 generation per prompt**.
+A new RL algorithm for LLMs that first estimates the optimal value function **offline** via sampling from reference policy, then performs **on-policy** updates with just **1 generation per prompt**.
 
 <p align="center"><img alt="A*-PO Figure 1" src="./assets/a_star_figure_1.png" width="800"/></p>
 
@@ -83,7 +83,22 @@ python ./preprocess/data_generation/model_generate.py --dataset ~/data/math/trai
 
 ## Training
 
-We will release the training code as soon as we cleaned it...
+```bash
+# gsm8k
+./scripts/apo_gsm8k.sh
+# math
+./scripts/apo_math.sh
+```
+
+The following are some important hyperparameters used in [`verl/trainer/config/apo_train.yaml`](verl/trainer/config/apo_train.yaml):
+
+| Hyperparameter       | Description                                      | Value |
+|----------------------|--------------------------------------------------|---------------|
+| `data.num_gen_to_use`         | Number of responses to use for value estimation in stage 1 | `8`         |
+| `data.beta1`         | $\beta_1$ for value estimation in stage 1        | `0.5`         |
+| `algorithm.beta2`         | $\beta_2$ for least-squared regressions in stage 2 | `1e-3`         |
+
+To save your model to huggingface, you can replace `trainer.default_hub_dir` with any huggingface repo to enable model uploading.
 
 ## Acknowledgements
 Our pipeline is built based on [TinyZero](https://github.com/Jiayi-Pan/TinyZero) and [verl](https://github.com/volcengine/verl).
