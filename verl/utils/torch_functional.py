@@ -227,11 +227,15 @@ def tokenize_and_postprocess_data(prompt: str,
                                   max_length: int,
                                   pad_token_id: int,
                                   left_pad=True,
+                                  add_prompt_template=True,
                                   truncation='error'):
     """
     input_data is the output from tokenizer.
     """
     assert truncation in ['left', 'right', 'error']
+
+    if add_prompt_template:
+        prompt = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
 
     input_data = tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
 

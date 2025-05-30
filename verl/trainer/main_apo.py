@@ -18,7 +18,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 from verl import DataProto
 import torch
 from verl.utils.reward_score import gsm8k, math, multiply, countdown
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.apo.ray_trainer import RayAPOTrainer
 
 
 def _select_rm_score_fn(data_source):
@@ -49,9 +49,10 @@ class RewardManager():
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
 
-        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        format_score_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        correctness_score_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
-        already_print_data_sources = {}
+        already_print_data_sources, recorded_sequence_reward = {}, []
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -77,8 +78,11 @@ class RewardManager():
             data_source = data_item.non_tensor_batch['data_source']
             compute_score_fn = _select_rm_score_fn(data_source)
 
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
-            reward_tensor[i, valid_response_length - 1] = score
+            format_score, correctness_score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
+            format_score_tensor[i, valid_response_length - 1] = format_score
+            correctness_score_tensor[i, valid_response_length - 1] = correctness_score
+
+            recorded_sequence_reward.append([sequences_str, str(ground_truth), format_score, correctness_score])
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
@@ -87,18 +91,19 @@ class RewardManager():
                 already_print_data_sources[data_source] += 1
                 print(sequences_str)
 
-        return reward_tensor
+        return format_score_tensor, correctness_score_tensor, recorded_sequence_reward
 
 
 import ray
 import hydra
 
 
-@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
+@hydra.main(config_path='config', config_name='apo_trainer', version_base=None)
 def main(config):
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
+        print(f'all available resources:{ray.available_resources()}')
 
     ray.get(main_task.remote(config))
 
@@ -106,7 +111,6 @@ def main(config):
 @ray.remote
 def main_task(config):
     from verl.utils.fs import copy_local_path_from_hdfs
-    from transformers import AutoTokenizer
 
     # print initial config
     from pprint import pprint
@@ -116,6 +120,7 @@ def main_task(config):
 
     # download the checkpoint from hdfs
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
+    print(f'local_path: {local_path}')
 
     # instantiate tokenizer
     from verl.utils import hf_tokenizer
@@ -124,7 +129,7 @@ def main_task(config):
     # define worker classes
     if config.actor_rollout_ref.actor.strategy == 'fsdp':
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+        from verl.workers.fsdp_workers_apo import ActorRolloutRefWorker, CriticWorker
         from verl.single_controller.ray import RayWorkerGroup
         ray_worker_group_cls = RayWorkerGroup
 
@@ -137,7 +142,7 @@ def main_task(config):
     else:
         raise NotImplementedError
 
-    from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+    from verl.trainer.apo.ray_trainer import ResourcePoolManager, Role
 
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
@@ -163,7 +168,7 @@ def main_task(config):
     # - The reward type depends on the tag of the data
     if config.reward_model.enable:
         if config.reward_model.strategy == 'fsdp':
-            from verl.workers.fsdp_workers import RewardModelWorker
+            from verl.workers.fsdp_workers_apo import RewardModelWorker
         elif config.reward_model.strategy == 'megatron':
             from verl.workers.megatron_workers import RewardModelWorker
         else:
@@ -178,7 +183,9 @@ def main_task(config):
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-    trainer = RayPPOTrainer(config=config,
+    print(f'resource_pool_manager: {resource_pool_manager}')
+
+    trainer = RayAPOTrainer(config=config,
                             tokenizer=tokenizer,
                             role_worker_mapping=role_worker_mapping,
                             resource_pool_manager=resource_pool_manager,

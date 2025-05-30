@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Core functions to implement PPO algorithms.
+Core functions to implement APO algorithms.
 The function implemented in this file should be used by trainer with different distributed strategies to
-implement PPO
+implement APO
 """
 
 import numpy as np
@@ -160,38 +160,21 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange):
-    """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
+def compute_policy_loss(attention_mask, ref_log_probs, log_probs, response_length, token_level_rewards, v_star, beta2):
 
-    Args:
-        old_log_prob: `(torch.Tensor)`
-            shape: (bs, response_length)
-        log_prob: `(torch.Tensor)`
-            shape: (bs, response_length)
-        advantages: `(torch.Tensor)`
-            shape: (bs, response_length)
-        eos_mask: `(torch.Tensor)`
-            shape: (bs, response_length)
-        cliprange: (float)
-            The clip range used in PPO. See https://arxiv.org/abs/1707.06347
+    # gather logprobs
+    response_mask = attention_mask[:, -response_length:]
+    ref_log_prob = (ref_log_probs * response_mask).sum(dim=-1)
+    log_prob = (log_probs * response_mask).sum(dim=-1)
 
-    Returns:
-        pg_loss: `a scalar torch.Tensor`
-            policy gradient loss computed via PPO
-        pg_clipfrac: (float)
-            a float number indicating the fraction of policy gradient loss being clipped
+    # gather reward
+    reward = (token_level_rewards * response_mask).sum(dim=-1)
 
-    """
-    negative_approx_kl = log_prob - old_log_prob
-    ratio = torch.exp(negative_approx_kl)
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
+    # compute loss
+    log_prob = log_prob - ref_log_prob
+    loss = (beta2 * log_prob + v_star - reward) ** 2
 
-    pg_losses = -advantages * ratio
-    pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
-
-    pg_loss = verl_F.masked_mean(torch.max(pg_losses, pg_losses2), eos_mask)
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses).float(), eos_mask)
-    return pg_loss, pg_clipfrac, ppo_kl
+    return loss.mean()
 
 
 def compute_entropy_loss(logits, eos_mask):

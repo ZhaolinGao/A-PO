@@ -20,6 +20,7 @@ import pandas as pd
 
 import torch
 import numpy as np
+from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -64,7 +65,11 @@ class RLHFDataset(Dataset):
                  parquet_files: Union[str, List[str]],
                  tokenizer: PreTrainedTokenizer,
                  prompt_key='prompt',
+                 beta1=0.5,
+                 filter_incorrect=False,
+                 num_gen_to_use=32,
                  max_prompt_length=1024,
+                 add_prompt_template=True,
                  filter_prompts=True,
                  cache_dir='~/.cache/verl/rlhf',
                  chat_template_func=None,
@@ -78,7 +83,11 @@ class RLHFDataset(Dataset):
         self.tokenizer = tokenizer
 
         self.prompt_key = prompt_key
+        self.beta1 = beta1
+        self.filter_incorrect = filter_incorrect
+        self.num_gen_to_use = num_gen_to_use
         self.max_prompt_length = max_prompt_length
+        self.add_prompt_template = add_prompt_template
         self.filter_prompts = filter_prompts
 
         self.return_raw_chat = return_raw_chat
@@ -87,6 +96,8 @@ class RLHFDataset(Dataset):
 
         self._download()
         self._read_files_and_tokenize()
+        self._process_values()
+        self._filter_dataset()
 
     def _download(self):
         from verl.utils.fs import copy_local_path_from_hdfs
@@ -96,8 +107,13 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.parquet_files:
+
+            # load huggingface dataset
+            if not parquet_file.endswith('.parquet'):
+                dataframe = load_dataset(parquet_file, split='train').to_pandas()
             # read parquet files and cache
-            dataframe = pd.read_parquet(parquet_file)
+            else:
+                dataframe = pd.read_parquet(parquet_file)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
@@ -107,12 +123,44 @@ class RLHFDataset(Dataset):
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
 
-        # nvm if prompt is too long
-        # self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
-        #     tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
-        #                                                      axis=1)]
+        if self.filter_prompts:
+            self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
+                tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                                                                axis=1)]
 
         print(f'filter dataset len: {len(self.dataframe)}')
+
+    def _process_values(self):
+
+        columns = self.dataframe.columns.tolist()
+
+        if self.beta1 < 0 or 'eval_0' not in columns:
+            v_star = np.zeros(len(self.dataframe))
+            print("v_star is set to 0")
+        elif self.beta1 == 0:
+            selected_cols = [f"eval_{i}" for i in range(self.num_gen_to_use)]
+            v_star = self.dataframe[selected_cols].to_numpy()
+            v_star = np.mean(v_star, axis=1)
+            print(f"v_star is set to mean with num_gen_to_use = {self.num_gen_to_use}")
+        else:
+            selected_cols = [f"eval_{i}" for i in range(self.num_gen_to_use)]
+            v_star = self.dataframe[selected_cols].to_numpy()
+            v_star = np.exp(v_star / self.beta1).mean(axis=1)
+            v_star = np.log(v_star) * self.beta1
+            print(f"v_star is set to exp with num_gen_to_use = {self.num_gen_to_use}, beta1 = {self.beta1}")
+
+        self.dataframe['v_star'] = list(v_star)
+
+    def _filter_dataset(self):
+
+        if self.filter_incorrect:
+            print(f"original dataset len: {len(self.dataframe)}")
+            assert self.num_gen_to_use > 0
+            selected_cols = [f"eval_{i}" for i in range(self.num_gen_to_use)]
+            evals = self.dataframe[selected_cols].to_numpy()
+            evals = np.mean(evals, axis=1)
+            self.dataframe = self.dataframe[evals != 0]
+            print(f'after filtering prompts with all incorrect responses: {len(self.dataframe)}')
 
     def __len__(self):
         return len(self.dataframe)
@@ -133,6 +181,7 @@ class RLHFDataset(Dataset):
                                                                          max_length=self.max_prompt_length,
                                                                          pad_token_id=self.tokenizer.pad_token_id,
                                                                          left_pad=True,
+                                                                         add_prompt_template=self.add_prompt_template,
                                                                          truncation=self.truncation)
 
         position_ids = compute_position_id_with_mask(attention_mask)
@@ -148,5 +197,6 @@ class RLHFDataset(Dataset):
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
+        row_dict["v_star"] = torch.tensor(row_dict["v_star"], dtype=torch.float32)
 
         return row_dict

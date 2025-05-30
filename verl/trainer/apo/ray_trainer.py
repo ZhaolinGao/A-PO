@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-FSDP PPO Trainer with Ray-based single controller.
+FSDP APO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
 import os
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -32,8 +33,13 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo import core_algos
+from verl.trainer.apo import core_algos
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
+
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+)
 
 WorkerType = Type[Worker]
 
@@ -113,40 +119,6 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1):
-    # prepare response group
-    # TODO: add other ways to estimate advantages
-    if adv_estimator == 'gae':
-        values = data.batch['values']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        token_level_rewards = data.batch['token_level_rewards']
-        advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
-                                                                      values=values,
-                                                                      eos_mask=response_mask,
-                                                                      gamma=gamma,
-                                                                      lam=lam)
-        data.batch['advantages'] = advantages
-        data.batch['returns'] = returns
-    elif adv_estimator == 'grpo':
-        token_level_rewards = data.batch['token_level_rewards']
-        index = data.non_tensor_batch['uid']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        advantages, returns = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_rewards,
-                                                                        eos_mask=response_mask,
-                                                                        index=index)
-        data.batch['advantages'] = advantages
-        data.batch['returns'] = returns
-    else:
-        raise NotImplementedError
-    return data
-
-
 def reduce_metrics(metrics: dict):
     for key, val in metrics.items():
         metrics[key] = np.mean(val)
@@ -170,12 +142,10 @@ def _compute_response_info(batch):
 
 
 def compute_data_metrics(batch, use_critic=True):
-    # TODO: add response length
     sequence_score = batch.batch['token_level_scores'].sum(-1)
+    sequence_format_score = batch.batch['token_level_format_scores'].sum(-1)
+    sequence_correctness_score = batch.batch['token_level_correctness_scores'].sum(-1)
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
-
-    advantages = batch.batch['advantages']
-    returns = batch.batch['returns']
 
     max_response_length = batch.batch['responses'].shape[-1]
 
@@ -188,15 +158,6 @@ def compute_data_metrics(batch, use_critic=True):
     prompt_length = response_info['prompt_length']
     response_length = response_info['response_length']
 
-    valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
-
-    if use_critic:
-        values = batch.batch['values']
-        valid_values = torch.masked_select(values, response_mask)
-        return_diff_var = torch.var(valid_returns - valid_values)
-        return_var = torch.var(valid_returns)
-
     metrics = {
         # score
         'critic/score/mean':
@@ -205,6 +166,20 @@ def compute_data_metrics(batch, use_critic=True):
             torch.max(sequence_score).detach().item(),
         'critic/score/min':
             torch.min(sequence_score).detach().item(),
+        # format score
+        'critic/format_score/mean':
+            torch.mean(sequence_format_score).detach().item(),
+        'critic/format_score/max':
+            torch.max(sequence_format_score).detach().item(),
+        'critic/format_score/min':
+            torch.min(sequence_format_score).detach().item(),
+        # correctness_score
+        'critic/correctness_score/mean':
+            torch.mean(sequence_correctness_score).detach().item(),
+        'critic/correctness_score/max':
+            torch.max(sequence_correctness_score).detach().item(),
+        'critic/correctness_score/min':
+            torch.min(sequence_correctness_score).detach().item(),
         # reward
         'critic/rewards/mean':
             torch.mean(sequence_reward).detach().item(),
@@ -212,27 +187,11 @@ def compute_data_metrics(batch, use_critic=True):
             torch.max(sequence_reward).detach().item(),
         'critic/rewards/min':
             torch.min(sequence_reward).detach().item(),
-        # adv
-        'critic/advantages/mean':
-            torch.mean(valid_adv).detach().item(),
-        'critic/advantages/max':
-            torch.max(valid_adv).detach().item(),
-        'critic/advantages/min':
-            torch.min(valid_adv).detach().item(),
-        # returns
-        'critic/returns/mean':
-            torch.mean(valid_returns).detach().item(),
-        'critic/returns/max':
-            torch.max(valid_returns).detach().item(),
-        'critic/returns/min':
-            torch.min(valid_returns).detach().item(),
         **({
             # values
             'critic/values/mean': torch.mean(valid_values).detach().item(),
             'critic/values/max': torch.max(valid_values).detach().item(),
             'critic/values/min': torch.min(valid_values).detach().item(),
-            # vf explained var
-            'critic/vf_explained_var': (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
         } if use_critic else {}),
 
         # response length
@@ -288,7 +247,7 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     timing_raw[name] = timer.last
 
 
-class RayPPOTrainer(object):
+class RayAPOTrainer(object):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -346,7 +305,11 @@ class RayPPOTrainer(object):
         self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
                                          tokenizer=self.tokenizer,
                                          prompt_key=self.config.data.prompt_key,
+                                         beta1=self.config.data.beta1,
+                                         filter_incorrect=self.config.data.filter_incorrect,
+                                         num_gen_to_use=self.config.data.num_gen_to_use,
                                          max_prompt_length=self.config.data.max_prompt_length,
+                                         add_prompt_template=self.config.data.add_prompt_template,
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation='error')
@@ -359,14 +322,18 @@ class RayPPOTrainer(object):
         self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
                                        tokenizer=self.tokenizer,
                                        prompt_key=self.config.data.prompt_key,
+                                       beta1=-1,
+                                       filter_incorrect=False,
+                                       num_gen_to_use=0,
                                        max_prompt_length=self.config.data.max_prompt_length,
+                                       add_prompt_template=self.config.data.add_prompt_template,
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation='error')
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=len(self.val_dataset),
                                          shuffle=True,
-                                         drop_last=True,
+                                         drop_last=False,
                                          collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1
@@ -390,8 +357,9 @@ class RayPPOTrainer(object):
             self.config.critic.optim.total_training_steps = total_training_steps
 
     def _validate(self):
-        reward_tensor_lst = []
+        format_score_tensor_lst, correctness_score_tensor_lst = [], []
         data_source_lst = []
+        recorded_sequence_reward_lst = []
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             # test_batch = test_batch.to('cuda')
@@ -420,24 +388,59 @@ class RayPPOTrainer(object):
 
             # evaluate using reward_function
             # for certain reward function (e.g. sandbox), the generation can overlap with reward
-            reward_tensor = self.val_reward_fn(test_batch)
+            format_score_tensor, correctness_score_tensor, recorded_sequence_reward = self.val_reward_fn(test_batch)
 
-            reward_tensor_lst.append(reward_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+            format_score_tensor_lst.append(format_score_tensor)
+            correctness_score_tensor_lst.append(correctness_score_tensor)
+            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * format_score_tensor.shape[0]))
+            recorded_sequence_reward_lst.append(recorded_sequence_reward)
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        format_score_tensor = torch.cat(format_score_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        correctness_score_tensor = torch.cat(correctness_score_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
+        metric_dict = {}
+
+        # log wandb table
+        recorded_sequence_reward_lst = np.concatenate(recorded_sequence_reward_lst, axis=0)
+        
+        if 'wandb' in self.config.trainer.logger and self.config.trainer.log_table_val != 0:
+            import wandb
+            if self.config.trainer.log_table_val < format_score_tensor.shape[0] and self.config.trainer.log_table_val > 0:
+                log_data_sources = data_sources[:self.config.trainer.log_table_val]
+                log_sequences_str = recorded_sequence_reward_lst[:self.config.trainer.log_table_val, 0]
+                log_ground_truth = recorded_sequence_reward_lst[:self.config.trainer.log_table_val, 1]
+                log_format_score = recorded_sequence_reward_lst[:self.config.trainer.log_table_val, 2]
+                log_correctness_score = recorded_sequence_reward_lst[:self.config.trainer.log_table_val, 3]
+            else:
+                log_data_sources = data_sources
+                log_sequences_str = recorded_sequence_reward_lst[:, 0]
+                log_ground_truth = recorded_sequence_reward_lst[:, 1]
+                log_format_score = recorded_sequence_reward_lst[:, 2]
+                log_correctness_score = recorded_sequence_reward_lst[:, 3]
+
+            metric_dict[f'val/generations_step_{self.global_steps}'] = wandb.Table(columns=["Data Source", "Sequence", "Ground Truth", "Format Score", "Correctness Score"], \
+                                                                                   data=np.stack([log_data_sources, log_sequences_str, log_ground_truth, log_format_score, log_correctness_score], axis=1))
+
         # evaluate test_score based on data source
         data_source_reward = {}
-        for i in range(reward_tensor.shape[0]):
+        for i in range(format_score_tensor.shape[0]):
             data_source = data_sources[i]
             if data_source not in data_source_reward:
                 data_source_reward[data_source] = []
-            data_source_reward[data_source].append(reward_tensor[i].item())
+            data_source_reward[data_source].append(format_score_tensor[i].item())
 
-        metric_dict = {}
         for data_source, rewards in data_source_reward.items():
-            metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
+            metric_dict[f'val/test_format_score/{data_source}'] = np.mean(rewards)
+
+        data_source_reward = {}
+        for i in range(correctness_score_tensor.shape[0]):
+            data_source = data_sources[i]
+            if data_source not in data_source_reward:
+                data_source_reward[data_source] = []
+            data_source_reward[data_source].append(correctness_score_tensor[i].item())
+
+        for data_source, rewards in data_source_reward.items():
+            metric_dict[f'val/test_correctness_score/{data_source}'] = np.mean(rewards)
 
         return metric_dict
 
@@ -458,15 +461,7 @@ class RayPPOTrainer(object):
             raise NotImplementedError
 
         # create critic
-        if self.config.algorithm.adv_estimator == 'gae':
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
-            self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
-            self.use_critic = True
-        elif self.config.algorithm.adv_estimator == 'grpo':
-            self.use_critic = False
-        else:
-            raise NotImplementedError
+        self.use_critic = False
 
         # create reference policy if needed
         if self.use_reference_policy:
@@ -527,6 +522,20 @@ class RayPPOTrainer(object):
                 self.config.trainer.default_hdfs_dir, 'critic')
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
+    def _upload_checkpoint(self):
+        if self.config.trainer.default_hub_dir is not None:
+            actor_hub_path = self.config.trainer.default_hub_dir + '_actor'
+            actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
+                                        f'global_step_{self.global_steps}')
+            # init model and tokenizer
+            temp_model = AutoModelForCausalLM.from_pretrained(actor_local_path, torch_dtype=torch.bfloat16)
+            temp_tokenizer = AutoTokenizer.from_pretrained(actor_local_path)
+            temp_model = temp_model.cpu()
+            temp_model.push_to_hub(actor_hub_path)
+            temp_tokenizer.push_to_hub(actor_hub_path)
+            del temp_model
+            del temp_tokenizer
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix='global_seqlen'):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch['attention_mask']
@@ -546,15 +555,16 @@ class RayPPOTrainer(object):
 
     def fit(self):
         """
-        The training loop of PPO.
-        The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
+        The training loop of APO.
+        The driver process only need to call the compute functions of the worker group through RPC to construct the APO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
         from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
 
+        time_id = int(time.time())
         logger = Tracking(project_name=self.config.trainer.project_name,
-                          experiment_name=self.config.trainer.experiment_name,
+                          experiment_name=f"{time_id}_{self.config.trainer.experiment_name}",
                           default_backend=self.config.trainer.logger,
                           config=OmegaConf.to_container(self.config, resolve=True))
 
@@ -608,12 +618,6 @@ class RayPPOTrainer(object):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
-                    # compute values
-                    if self.use_critic:
-                        with _timer('values', timing_raw):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
-
                     with _timer('adv', timing_raw):
                         # compute scores. Support both model and function-based.
                         # We first compute the scores using reward model. Then, we call reward_fn to combine
@@ -624,8 +628,11 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
+                        format_score_tensor, correctness_score_tensor, _ = self.reward_fn(batch)
+                        reward_tensor = format_score_tensor + correctness_score_tensor
                         batch.batch['token_level_scores'] = reward_tensor
+                        batch.batch['token_level_format_scores'] = format_score_tensor
+                        batch.batch['token_level_correctness_scores'] = correctness_score_tensor
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.use_kl_loss:
@@ -635,13 +642,6 @@ class RayPPOTrainer(object):
                             metrics.update(kl_metrics)
                         else:
                             batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
-
-                        # compute advantages, executed on the driver process
-                        batch = compute_advantage(batch,
-                                                  adv_estimator=self.config.algorithm.adv_estimator,
-                                                  gamma=self.config.algorithm.gamma,
-                                                  lam=self.config.algorithm.lam,
-                                                  num_repeat=self.config.actor_rollout_ref.rollout.n)
 
                     # update critic
                     if self.use_critic:
@@ -669,6 +669,7 @@ class RayPPOTrainer(object):
                             self.global_steps % self.config.trainer.save_freq == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
+                            self._upload_checkpoint()
 
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
@@ -686,4 +687,9 @@ class RayPPOTrainer(object):
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')
                         logger.log(data=val_metrics, step=self.global_steps)
+
+                    # make sure wandb finishes logging
+                    if 'wandb' in self.config.trainer.logger:
+                        logger.logger['wandb'].finish()
+
                     return
