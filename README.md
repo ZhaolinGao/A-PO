@@ -90,7 +90,7 @@ python ./preprocess/data_generation/model_generate.py --dataset ~/data/math/trai
 ./scripts/apo_math.sh
 ```
 
-The following are some important hyperparameters used in [`verl/trainer/config/apo_train.yaml`](verl/trainer/config/apo_train.yaml):
+The following are some important hyperparameters used in [`verl/trainer/config/apo_train.yaml`](https://github.com/ZhaolinGao/A-PO/blob/main/verl/trainer/config/apo_trainer.yaml):
 
 | Hyperparameter       | Description                                      | Value |
 |----------------------|--------------------------------------------------|---------------|
