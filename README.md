@@ -100,6 +100,36 @@ The following are some important hyperparameters used in [`verl/trainer/config/a
 
 To save your model to huggingface, you can replace `trainer.default_hub_dir` with any huggingface repo to enable model uploading.
 
+Our trained models on MATH can be found at:
+
+<table>
+  <tr>
+    <td>Qwen2.5-1.5B</td>
+    <td><a href="https://huggingface.co/Cornell-AGI/apo_math_qwen2.5_1.5b">APO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/ppo_math_qwen2.5_1.5b">PPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/grpo_math_qwen2.5_1.5b">GRPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/rebel_math_qwen2.5_1.5b">REBEL</a></td>
+  </tr>
+  <tr>
+    <td>Qwen2.5-3B</td>
+    <td><a href="https://huggingface.co/Cornell-AGI/apo_math_qwen2.5_3b">APO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/ppo_math_qwen2.5_3b">PPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/grpo_math_qwen2.5_3b">GRPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/rebel_math_qwen2.5_3b">REBEL</a></td>
+  </tr>
+  <tr>
+    <td>Qwen2.5-7B</td>
+    <td><a href="https://huggingface.co/Cornell-AGI/apo_math_qwen2.5_7b">APO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/ppo_math_qwen2.5_7b">PPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/grpo_math_qwen2.5_7b">GRPO</a></td>
+    <td><a href="https://huggingface.co/Cornell-AGI/rebel_math_qwen2.5_7b">REBEL</a></td>
+  </tr>
+</table>
+
+Evaluations on MATH500, Minerva Math, Olympiad Bench, and AMC 23:
+
+<p align="center"><img alt="A*-PO Evaluations" src="./assets/evaluations.png" width="800"/></p>
+
 ## Acknowledgements
 Our pipeline is built based on [TinyZero](https://github.com/Jiayi-Pan/TinyZero) and [verl](https://github.com/volcengine/verl).
 
